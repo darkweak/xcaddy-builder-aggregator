@@ -1,0 +1,7 @@
+email: my@email.com
+file_path: 'any/directory/file/to/update.yml'
+owner: johndoe
+pat: xxx
+path: data/modules.yml
+repository: xcaddy-builder-website
+store_ttl: 1
