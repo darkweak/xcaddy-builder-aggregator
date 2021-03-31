@@ -9,8 +9,7 @@ import (
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
-	"io/ioutil"
-	"log"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -50,7 +49,7 @@ func (c *CaddyAggregator) LoadConfiguration(channel chan int) {
 }
 
 func (c *CaddyAggregator) hasChanged(module CaddyModule) bool {
-	if module.Version != "" && module.Hash != "" {
+	if _, err := time.Parse(time.RFC3339, module.Hash); err != nil && module.Version != "" && module.Hash != "" {
 		key := module.Repository
 		hash, _ := c.store.Get(key)
 
@@ -61,38 +60,6 @@ func (c *CaddyAggregator) hasChanged(module CaddyModule) bool {
 	}
 
 	return false
-}
-
-func (c *CaddyAggregator) redeploy(data []byte) {
-	err := ioutil.WriteFile(c.configuration.FilePath, data, 0666)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
-func (c *CaddyAggregator) pushToGit(data []byte) {
-	commitOption := &github.RepositoryContentFileOptions{
-		Branch:  github.String("master"),
-		Message: github.String("Update from xcaddy-builder-aggregator"),
-		Committer: &github.CommitAuthor{
-			Name:  github.String(c.configuration.Owner),
-			Email: github.String(c.configuration.Email),
-		},
-		Author: &github.CommitAuthor{
-			Name:  github.String(c.configuration.Owner),
-			Email: github.String(c.configuration.Email),
-		},
-
-		Content: data,
-	}
-
-	x, _, err := c.restClient.Repositories.UpdateFile(c.clientCTX, c.configuration.Owner, c.configuration.Repository, c.configuration.Path, commitOption)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(x.SHA)
-	fmt.Println(x)
 }
 
 func (c *CaddyAggregator) fetchCaddyfile(module CaddyModule, path string) string {
@@ -109,7 +76,19 @@ func (c *CaddyAggregator) fetchCaddyfile(module CaddyModule, path string) string
 	return ""
 }
 
-func (c *CaddyAggregator) parseData(rr RepositoryRetriever) {
+func containsModule(list []CaddyModule, module CaddyModule) bool {
+	if regexp.MustCompile("caddyserver/caddy/v2/modules").MatchString(module.Repository) {
+		return true
+	}
+	for _, v := range list {
+		if v.Repository == module.Repository {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *CaddyAggregator) parseData(r Retriever) {
 	var modules []CaddyModule
 	e := Parse(c.configuration.FilePath, &modules)
 	for _, m := range modules {
@@ -121,7 +100,36 @@ func (c *CaddyAggregator) parseData(rr RepositoryRetriever) {
 		panic(e)
 	}
 	hasUpdated := false
-	for _, edge := range rr.Search.Edges {
+	for _, cm := range r.Caddy {
+		sPath := strings.Split(cm.Repository, "/")
+		description := ""
+		if len(cm.Modules) > 0 {
+			description = cm.Modules[0].Description
+		}
+		name := sPath[2]
+		if name == "caddy-ext" {
+			name = sPath[3]
+		}
+		module := CaddyModule{
+			Author:      sPath[1],
+			Config:      "",
+			Name:        name,
+			Description: description,
+			Hash:        cm.Hash,
+			Repository:  cm.Repository,
+			Tags:        []string{},
+			Version:     "latest",
+		}
+
+		if c.hasChanged(module) {
+			hasUpdated = true
+		}
+		if !containsModule(modules, module) {
+			modules = append(modules, module)
+		}
+	}
+
+	for _, edge := range r.Github.Search.Edges {
 		r := edge.Node.Repository
 		names := strings.Split(string(r.NameWithOwner), "/")
 		s := strings.Split(string(r.LatestRelease.TagCommit.CommitUrl), "/")
@@ -129,7 +137,10 @@ func (c *CaddyAggregator) parseData(rr RepositoryRetriever) {
 		for _, tag := range r.RepositoryTopics.Nodes {
 			tags = append(tags, string(tag.Topic.Name))
 		}
-
+		version := string(r.LatestRelease.TagName)
+		if version == "" {
+			version = "latest"
+		}
 		commitHash := s[len(s)-1]
 		module := CaddyModule{
 			Author:      names[0],
@@ -139,7 +150,7 @@ func (c *CaddyAggregator) parseData(rr RepositoryRetriever) {
 			Hash:        commitHash,
 			Repository:  fmt.Sprintf("github.com/%s", string(r.NameWithOwner)),
 			Tags:        tags,
-			Version:     string(r.LatestRelease.TagName),
+			Version:     version,
 		}
 
 		cf := module.retrieveCaddyfile(r.LatestRelease)
@@ -147,7 +158,9 @@ func (c *CaddyAggregator) parseData(rr RepositoryRetriever) {
 			hasUpdated = true
 			module.Config = c.fetchCaddyfile(module, cf)
 		}
-		modules = append(modules, module)
+		if !containsModule(modules, module) {
+			modules = append(modules, module)
+		}
 	}
 
 	if hasUpdated {
@@ -164,12 +177,6 @@ func (c *CaddyAggregator) parseData(rr RepositoryRetriever) {
 }
 
 func (c *CaddyAggregator) UpdateModulesList() {
-	rr := newRepositoryRetriever()
-	e := c.graphClient.Query(c.clientCTX, &rr, nil)
-	if e != nil {
-		panic(e)
-	}
-
-	c.parseData(rr)
+	c.parseData(retrieveAllData(c))
 	c.store.SetWithTTL("aggregator", "", 1, time.Minute*time.Duration(c.configuration.StoreTTL))
 }

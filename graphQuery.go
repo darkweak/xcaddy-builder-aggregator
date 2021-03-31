@@ -41,7 +41,7 @@ type LatestRelease struct {
 	} `graphql:"tagCommit"`
 }
 
-type RepositoryRetriever struct {
+type GithubRepositoryRetriever struct {
 	Search struct {
 		Edges []struct {
 			Node struct {
@@ -63,6 +63,6 @@ type RepositoryRetriever struct {
 	} `graphql:"search(query: \"topic:caddy-module sort:updated-desc\", type: REPOSITORY, first: 100)"`
 }
 
-func newRepositoryRetriever() RepositoryRetriever {
-	return RepositoryRetriever{}
+func newRepositoryRetriever() GithubRepositoryRetriever {
+	return GithubRepositoryRetriever{}
 }
